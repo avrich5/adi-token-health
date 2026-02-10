@@ -1,9 +1,9 @@
 {
   "resistance": {
-    "critical": 0.001,
-    "low": 0.01,
-    "medium": 0.05,
-    "high": 0.15,
+    "critical": 0.05,
+    "low": 0.10,
+    "medium": 0.20,
+    "high": 0.30,
     "description": "Volume / (FDV * 5%) — absorption capacity proxy"
   },
   "spread": {
@@ -54,9 +54,24 @@
     "description": "30-day price change as decimal"
   },
   "state_categories": {
-    "healthy": [1, 2, 5],
-    "caution": [3, 6, 10, 11],
-    "warning": [4, 7, 8, 9, 12]
+    "healthy": [
+      1,
+      2,
+      5
+    ],
+    "caution": [
+      3,
+      6,
+      10,
+      11
+    ],
+    "warning": [
+      4,
+      7,
+      8,
+      9,
+      12
+    ]
   },
   "state_names": {
     "1": "Healthy Utility Expansion",
@@ -86,7 +101,11 @@
     "11": "System transitioning from one stable regime to another",
     "12": "Slow decay without capitulation - gradual loss of interest and value"
   },
-  "classification_priority": [9, 11, 3],
+  "classification_priority": [
+    9,
+    11,
+    3
+  ],
   "notes": {
     "calibration": "These thresholds require calibration on real historical data",
     "last_updated": "2025-02-10",

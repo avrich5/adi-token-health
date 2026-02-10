@@ -74,13 +74,16 @@ export default function Timeline() {
 
       {/* State legend ribbon */}
       <div className="state-ribbon">
-        {stateZones.map((z, i) => (
-          <div key={i} className={`ribbon-segment cat-${z.category}`}
-            style={{ flex: 1 }}
-            title={`${z.stateName} (${z.x1} → ${z.x2})`}>
-            <span className="ribbon-label">{z.stateName}</span>
-          </div>
-        ))}
+        {stateZones.map((z, i) => {
+          const days = Math.max(1, (new Date(z.x2) - new Date(z.x1)) / 86400000 + 1);
+          return (
+            <div key={i} className={`ribbon-segment cat-${z.category}`}
+              style={{ flex: days }}
+              title={`${z.stateName} (${z.x1} → ${z.x2})`}>
+              {days > 3 && <span className="ribbon-label">{z.stateName}</span>}
+            </div>
+          );
+        })}
       </div>
 
       <div className="timeline-chart-wrap">
