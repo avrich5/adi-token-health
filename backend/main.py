@@ -385,46 +385,62 @@ def classify_state(metrics: dict, forces: dict) -> dict:
     utility_val = forces.get("utility_demand", 0)
 
     # Priority 1: Liquidity Stress (9) — absolute thin market OR relative volume drop
+    # Absolute stress: resistance < 0.001 (approx $2.5k daily volume)
     if resistance < state_thresholds["resistance"]["critical"]:
-        state_id, confidence = 9, 0.90
-    elif resistance < state_thresholds["resistance"]["low"] and volume_ratio < state_thresholds["volume_ratio"]["very_low"]:
-        state_id, confidence = 9, 0.80
+        state_id, confidence = 9, 0.95
+    # Relative stress: resistance < 0.01 AND volume dropped below 80% of average
+    elif resistance < state_thresholds["resistance"]["low"] and volume_ratio < state_thresholds["volume_ratio"]["normal_low"]:
+        state_id, confidence = 9, 0.85
+        
     # Priority 2: Structural Transition (11)
     elif volatility_ratio > state_thresholds["volatility_ratio"]["high"] and abs(price_7d) > 0.1:
         state_id, confidence = 11, 0.75
+        
     # Priority 3: Speculative Dominance (3)
     elif btc_correlation > 0.7 and volatility_ratio > 1.5 and price_7d > 0.15:
         state_id, confidence = 3, 0.82
+        
     # Erosion Phase (12)
     elif price_30d < -0.15 and volume_ratio < 0.8:
         state_id, confidence = 12, 0.78
+        
     # Utility Degradation (8)
     elif utility_val < -0.5 and market_val < 0:
         state_id, confidence = 8, 0.70
-    # Healthy Utility Expansion (1)
+        
+    # Healthy Utility Expansion (1) - requires High Resistance + Utility + Price Growth
     elif resistance > state_thresholds["resistance"]["high"] and utility_val > 0.3 and price_7d > 0:
         state_id, confidence = 1, 0.80
-    # Liquidity-Driven Expansion (5) — strong volume + price growth
+        
+    # Liquidity-Driven Expansion (5) — High Resistance + Strong Growth
     elif resistance > state_thresholds["resistance"]["high"] and price_7d > 0.05:
         state_id, confidence = 5, 0.72
-    # Utility-Driven Stability (2) — decent resistance, stable price
+        
+    # Utility-Driven Stability (2) — Medium Resistance + Stable Price
     elif resistance > state_thresholds["resistance"]["medium"] and abs(price_7d) < 0.05:
         state_id, confidence = 2, 0.78
+        
     # Speculative with lower correlation (3)
     elif market_val > 0.5 and utility_val < 0:
         state_id, confidence = 3, 0.65
+        
     # Utility-Market Divergence (4)
     elif utility_val > 0.3 and market_val < -0.3:
         state_id, confidence = 4, 0.68
+        
     # Moderate expansion — resistance between low and medium, price up
     elif resistance > state_thresholds["resistance"]["low"] and price_7d > 0.03:
         state_id, confidence = 5, 0.55
+        
     # Narrative-Driven Volatility (10)
     elif volatility_ratio > 1.5 and volume_ratio > 2.0:
         state_id, confidence = 10, 0.65
-    # Low resistance fallback — Incentive-Driven Usage (6) with caution
+        
+    # Low resistance fallback — Incentive-Driven Usage (6)
+    # This catches everything with Low-to-Medium resistance that isn't Liquidity Stress
     elif resistance < state_thresholds["resistance"]["medium"]:
-        state_id, confidence = 6, 0.55
+        state_id, confidence = 6, 0.60
+        
     # Default — stable enough for Utility-Driven Stability (2)
     else:
         state_id, confidence = 2, 0.50
