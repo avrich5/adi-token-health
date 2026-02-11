@@ -7,6 +7,7 @@ import ForcesPanel from './components/ForcesPanel';
 import TransitionsPanel from './components/TransitionsPanel';
 import Timeline from './components/Timeline';
 import ForcesTimeline from './components/ForcesTimeline';
+import ScenariosValidation from './components/ScenariosValidation';
 import Footer from './components/Footer';
 import './Dashboard.css';
 
@@ -59,6 +60,7 @@ export default function Dashboard() {
 
       <Timeline />
       <ForcesTimeline />
+      <ScenariosValidation />
 
       <Footer />
     </div>

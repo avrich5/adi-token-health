@@ -862,6 +862,308 @@ async def analyze_scenario(request: ScenarioRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# SCENARIO BRUTEFORCE & VALIDATION
+# ============================================================================
+
+def generate_force_scenarios(base_forces: dict, steps: list = [-0.3, -0.15, 0.0, 0.15, 0.3]) -> list:
+    """
+    Generate all permissible force combinations by adjusting each force.
+    Returns list of {forces: {...}, delta: {...}} representing each scenario.
+    """
+    import itertools
+    force_ids = list(base_forces.keys())
+    scenarios = []
+    
+    for deltas in itertools.product(steps, repeat=len(force_ids)):
+        adjusted = {}
+        delta_map = {}
+        for fid, delta in zip(force_ids, deltas):
+            new_val = max(-1.0, min(1.0, base_forces[fid] + delta))
+            adjusted[fid] = round(new_val, 3)
+            delta_map[fid] = round(delta, 3)
+        scenarios.append({"forces": adjusted, "delta": delta_map})
+    
+    return scenarios
+
+
+def score_scenario(scenario_forces: dict, actual_next: dict, base_state_id: int) -> dict:
+    """
+    Score a scenario against what actually happened next day.
+    Returns {predicted_state, actual_state, match, deviation}.
+    """
+    # Classify the scenario's predicted state
+    # We need metrics context — use a simplified version
+    metrics_stub = {
+        "resistance": actual_next.get("resistance", 0.5),
+        "volume_ratio": 1.0,
+        "price_change_7d": actual_next.get("change_7d_pct", 0) / 100,
+        "price_change_30d": 0.0,
+        "btc_correlation": 0.5,
+        "volatility_ratio": 1.0
+    }
+    predicted = classify_state(metrics_stub, scenario_forces)
+    actual_state_id = actual_next.get("state_id", base_state_id)
+    
+    # Calculate force deviation from what actually happened
+    actual_forces = actual_next.get("forces", {})
+    total_dev = 0
+    for fid, val in scenario_forces.items():
+        actual_val = actual_forces.get(fid, {}).get("value", 0) if isinstance(actual_forces.get(fid), dict) else actual_forces.get(fid, 0)
+        total_dev += abs(val - actual_val)
+    
+    return {
+        "predicted_state_id": predicted["id"],
+        "predicted_state": predicted["name"],
+        "predicted_category": predicted["category"],
+        "actual_state_id": actual_state_id,
+        "match": predicted["id"] == actual_state_id,
+        "force_deviation": round(total_dev, 3)
+    }
+
+
+def rank_scenarios_by_probability(scenarios: list, base_forces: dict) -> list:
+    """
+    Rank scenarios by likelihood. Scenarios closer to base forces are more probable.
+    Uses exponential decay based on total delta magnitude.
+    """
+    import math
+    ranked = []
+    for s in scenarios:
+        total_delta = sum(abs(d) for d in s["delta"].values())
+        # Exponential probability: smaller delta = higher probability
+        raw_prob = math.exp(-3.0 * total_delta)
+        ranked.append({**s, "raw_probability": raw_prob, "total_delta": round(total_delta, 3)})
+    
+    # Normalize to sum=100
+    total = sum(r["raw_probability"] for r in ranked)
+    for r in ranked:
+        r["probability"] = round((r["raw_probability"] / total) * 100, 2) if total > 0 else 0
+        del r["raw_probability"]
+    
+    ranked.sort(key=lambda x: x["probability"], reverse=True)
+    return ranked
+
+
+@app.get("/api/scenarios/daily")
+async def get_daily_scenarios():
+    """
+    Bruteforce scenario generation + retrospective validation.
+    For each historical day: generate all force combinations,
+    rank by probability, show top-3, validate against next day's reality.
+    """
+    try:
+        candles = await fetch_kraken_ohlc()
+        if not candles or len(candles) < 10:
+            raise HTTPException(status_code=503, detail="Insufficient historical data")
+        
+        # First, build the same timeline as /api/history to get forces per day
+        # (reuse logic from history endpoint)
+        import math
+        mock_forces = {f["id"]: f["current_value"] for f in forces_config["forces"]}
+        
+        daily_data = []
+        for i, candle in enumerate(candles):
+            price = candle["close"]
+            vol = candle["volume"] * price
+            lookback = candles[max(0, i-6):i+1]
+            avg_vol = sum(c["volume"] * c["close"] for c in lookback) / len(lookback) if lookback else vol
+            volume_ratio = vol / avg_vol if avg_vol > 0 else 1.0
+            
+            price_range_pct = (candle["high"] - candle["low"]) / price if price > 0 else 0
+            alpha = 200000
+            resistance = round(1.0 - math.tanh(alpha * price_range_pct / vol), 4) if vol > 0 else 0.0
+            
+            change_7d = 0.0
+            if i >= 7:
+                p7 = candles[i-7]["close"]
+                change_7d = (price - p7) / p7 if p7 > 0 else 0
+            
+            change_30d = 0.0
+            if i >= 30:
+                p30 = candles[i-30]["close"]
+                change_30d = (price - p30) / p30 if p30 > 0 else 0
+            
+            # Forces (same as history)
+            m_market = volume_ratio
+            a_market = change_7d * 5 if i >= 7 else 0
+            f_market = round(max(-1, min(1, m_market * a_market)), 3)
+            
+            candle_date = datetime.fromisoformat(candle["date"])
+            f_emission = calculate_emission_pressure(vesting_schedule, ref_date=candle_date)
+            
+            m_utility = 0.15
+            a_utility = (change_7d * 0.5 + (volume_ratio - 1) * 0.3) if i >= 7 else 0.1
+            f_utility = round(max(-1, min(1, m_utility * a_utility * 3)), 3)
+            
+            m_mm = 0.08
+            a_mm = (volume_ratio - 0.7) * 5
+            f_mm = round(max(-1, min(1, m_mm * a_mm)), 3)
+            
+            abs_change = abs(change_7d) if i >= 7 else 0
+            m_narrative = min(1.0, abs_change * 8)
+            a_narrative = 0.3 if abs_change > 0.03 else 0.05
+            f_narrative_dir = 1 if change_7d >= 0 else -1
+            f_narrative = round(max(-1, min(1, m_narrative * a_narrative * f_narrative_dir)), 3)
+            
+            forces = {
+                "market_pressure": f_market,
+                "emission_pressure": f_emission,
+                "utility_demand": f_utility,
+                "mm_activity": f_mm,
+                "narrative": f_narrative
+            }
+            
+            metrics = {
+                "resistance": resistance,
+                "volume_ratio": round(volume_ratio, 2),
+                "price_change_7d": round(change_7d, 4),
+                "price_change_30d": round(change_30d, 4),
+                "btc_correlation": 0.5,
+                "volatility_ratio": 1.0
+            }
+            state = classify_state(metrics, forces)
+            
+            daily_data.append({
+                "date": candle["date"],
+                "price": round(price, 4),
+                "resistance": resistance,
+                "state_id": state["id"],
+                "state_name": state["name"],
+                "short_name": state["short_name"],
+                "category": state["category"],
+                "change_7d_pct": round(change_7d * 100, 2),
+                "forces": forces,
+                "volume_usd": round(vol, 0)
+            })
+        
+        # Now generate scenarios for last 14 days (with validation for all but last)
+        # Use coarser steps for performance: 3 levels per force = 3^5 = 243 scenarios
+        steps = [-0.2, 0.0, 0.2]
+        scenario_days = []
+        validated_count = 0
+        total_scenarios_count = 0
+        
+        start_idx = max(7, len(daily_data) - 45)  # last 14 days, but need 7 days history
+        
+        for i in range(start_idx, len(daily_data)):
+            day = daily_data[i]
+            base_forces = day["forces"]
+            
+            # Generate all scenarios
+            all_scenarios = generate_force_scenarios(base_forces, steps)
+            total_count = len(all_scenarios)
+            total_scenarios_count += total_count
+            
+            # Rank by probability
+            ranked = rank_scenarios_by_probability(all_scenarios, base_forces)
+            
+            # Classify each of top scenarios
+            top3 = []
+            for s in ranked[:3]:
+                state = classify_state({
+                    "resistance": day["resistance"],
+                    "volume_ratio": 1.0,
+                    "price_change_7d": day["change_7d_pct"] / 100,
+                    "price_change_30d": 0.0,
+                    "btc_correlation": 0.5,
+                    "volatility_ratio": 1.0
+                }, s["forces"])
+                top3.append({
+                    "rank": len(top3) + 1,
+                    "state_id": state["id"],
+                    "state_name": state["name"],
+                    "short_name": state["short_name"],
+                    "category": state["category"],
+                    "probability": s["probability"],
+                    "delta": s["delta"],
+                    "total_delta": s["total_delta"]
+                })
+            
+            # Count by risk level - relative to current base
+            base_net = sum(base_forces.values())
+            risk_counts = {"critical": 0, "attention": 0, "stable": 0}
+            for s in ranked:
+                scenario_net = sum(s["forces"].get(fid, 0) for fid in base_forces)
+                pct_change = (scenario_net - base_net) / max(abs(base_net), 0.01)
+                if pct_change < -0.4:
+                    risk_counts["critical"] += 1
+                elif pct_change < -0.15:
+                    risk_counts["attention"] += 1
+                else:
+                    risk_counts["stable"] += 1
+            
+            # Validation against next day (if available)
+            validation = None
+            if i + 1 < len(daily_data):
+                next_day = daily_data[i + 1]
+                # Which of top-3 matched?
+                matched_rank = None
+                for t in top3:
+                    if t["state_id"] == next_day["state_id"]:
+                        matched_rank = t["rank"]
+                        break
+                
+                # Force deviation for top-1 scenario
+                top1_forces = ranked[0]["forces"] if ranked else base_forces
+                force_dev = sum(
+                    abs(top1_forces.get(fid, 0) - next_day["forces"].get(fid, 0))
+                    for fid in base_forces.keys()
+                )
+                
+                validation = {
+                    "actual_state_id": next_day["state_id"],
+                    "actual_state": next_day["state_name"],
+                    "actual_short": next_day["short_name"],
+                    "actual_category": next_day["category"],
+                    "matched_rank": matched_rank,  # 1, 2, 3, or None
+                    "status": "validated" if matched_rank else "missed",
+                    "force_deviation": round(force_dev, 3),
+                    "actual_date": next_day["date"]
+                }
+                if matched_rank:
+                    validated_count += 1
+            
+            scenario_days.append({
+                "date": day["date"],
+                "current_state": {
+                    "id": day["state_id"],
+                    "name": day["state_name"],
+                    "short_name": day["short_name"],
+                    "category": day["category"]
+                },
+                "resistance": day["resistance"],
+                "price": day["price"],
+                "scenarios_total": total_count,
+                "risk_distribution": risk_counts,
+                "top_scenarios": top3,
+                "validation": validation
+            })
+        
+        validatable = sum(1 for d in scenario_days if d["validation"] is not None)
+        
+        return {
+            "scenario_days": scenario_days,
+            "summary": {
+                "days_analyzed": len(scenario_days),
+                "total_scenarios_generated": total_scenarios_count,
+                "scenarios_per_day": len(all_scenarios) if all_scenarios else 0,
+                "force_steps": steps,
+                "validated_count": validated_count,
+                "validatable_count": validatable,
+                "validation_rate": round((validated_count / validatable * 100), 1) if validatable > 0 else 0,
+                "knowledge_units": validated_count
+            },
+            "generated_at": datetime.now().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"❌ ERROR in daily scenarios:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # SERVER STARTUP
 # ============================================================================
 
